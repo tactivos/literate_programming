@@ -24,7 +24,6 @@ def _refresh_manifest():
 
 
 def _execute():
-    print('I am here 1')
     subproccess_deps = _refresh_deps()
     if subproccess_deps.returncode == 0:
         logging.info('DBT packages successfully refreshed')
@@ -33,12 +32,9 @@ def _execute():
     if subproccess_compile.returncode == 0:
         logging.info('DBT manifest file successfully refreshed')
 
-    print('I am here 2')
     dbt_manifest_parser = DbtManifestParser()
-    print('~' * 20)
-    for dag_id in dbt_manifest_parser.get_all_dag_names():
+    for dag_id in dbt_manifest_parser.get_all_dags():
 
-        print('I am here 3: ' + dag_id)
         dag: DAG = airflow_dag.create(
             execution_timeout=timedelta(seconds=60),
             description="DAG generated from DBT manifest file",
@@ -48,15 +44,13 @@ def _execute():
                                 hour=0, minute=0, second=0),
             schedule_interval="@daily"
         )
-        print("Created DAG: " + dag_id)
-        print('~' * 20)
+
         with dag:
             g = dbt_manifest_parser.get_dag(dag_id)
-            for n, d in g.nodes(data=True):
-                print(n, d)
 
             task_nodes = {}
 
+            # Add task nodes to Airflow DAG
             for node, data in g.nodes(data=True):
                 if data['type'] in ['model', 'snapshot', 'test']:
                     task_nodes[node] = BashOperator(
@@ -64,25 +58,29 @@ def _execute():
                         bash_command=data['command'],
                         dag=dag,
                     )
+            # Add wait-for node to Airflow DAG
             for edge in g.edges():
-                if g.nodes[edge[1]]['type'] == 'wait_for':
-                    wait_for_node = edge[1]
-                    if wait_for_node not in task_nodes:
-                        external_dag_id = g.nodes[edge[0]]['dag_name']
-                        external_task_id = edge[0]
-                        task_nodes[wait_for_node] = wait_for(
-                            dag,
-                            task_id=wait_for_node,
-                            external_dag_id=external_dag_id,
-                            external_task_id=external_task_id
-                        )
+                for i in range(2):
+                    if g.nodes[edge[i]]['type'] == 'wait_for':
+                        wait_for_node = edge[i]
+                        if edge[i] not in task_nodes:
+                            external_dag = g.nodes[wait_for_node]['external_dag']
+                            external_task = g.nodes[wait_for_node]['external_task']
+                            task_nodes[edge[i]] = wait_for(
+                                dag,
+                                task_id=wait_for_node,
+                                external_dag_id=external_dag,
+                                external_task_id=external_task
+                            )
 
             for edge in g.edges():
                 task_nodes[edge[0]].set_downstream(task_nodes[edge[1]])
 
             start_dummy = DummyOperator(task_id='start')
             end_dummy = DummyOperator(task_id='end')
+            # Connect start node to all task nodes having indegree = 0
             start_dummy.set_downstream([task_nodes[n] for n in g.nodes() if g.in_degree(n) == 0])
+            # Connect end code to all task nodes having outdegree = 0
             end_dummy.set_upstream([task_nodes[n] for n in g.nodes() if g.out_degree(n) == 0])
             globals()[dag_id] = dag
 
